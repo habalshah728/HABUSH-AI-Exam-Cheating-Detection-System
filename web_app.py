@@ -70,6 +70,7 @@ report_gen = ReportGenerator(db, config.reports_dir, evidence_dir=config.evidenc
 _MODEL_INIT_LOCK = threading.Lock()
 _INFER_LOCK = threading.Lock()
 _SHARED_MODELS: dict[str, Any] = {}
+_WARMUP_STATUS: dict[str, Any] = {"ready": False, "error": ""}
 
 
 def _trim_process_memory() -> None:
@@ -149,8 +150,28 @@ def _warmup_models() -> None:
     """Pre-warm YOLO + MediaPipe runtimes in a worker thread after server startup."""
     try:
         _get_or_init_shared_models()
-    except Exception:
-        pass
+        _WARMUP_STATUS["ready"] = True
+        _WARMUP_STATUS["error"] = ""
+    except Exception as exc:
+        import traceback
+
+        _WARMUP_STATUS["ready"] = False
+        _WARMUP_STATUS["error"] = f"{type(exc).__name__}: {exc}\n{traceback.format_exc()}"
+
+
+async def _init_ws_engine(
+    websocket: WebSocket, confidence: float = 0.40, cooldown: float = 5.0
+) -> DetectionEngine | None:
+    """Acquire shared AI engine on a worker thread and report any failure over WS."""
+    try:
+        return await asyncio.to_thread(_create_session_engine, confidence, cooldown)
+    except Exception as exc:
+        try:
+            await websocket.send_json({"type": "error", "message": f"AI init error: {exc}"})
+            await websocket.close()
+        except Exception:
+            pass
+        return None
 
 
 @asynccontextmanager
@@ -161,7 +182,7 @@ async def _lifespan(_app: FastAPI):
 
 app = FastAPI(
     title="HABUSH CMS — AI Exam Integrity Platform",
-    version="1.1.0",
+    version="1.1.2",
     lifespan=_lifespan,
 )
 
@@ -378,6 +399,32 @@ async def api_admin_overview(request: Request):
         "accounts": accounts,
         "reports": reports,
     }
+
+
+@app.get("/api/admin/runtime-status")
+async def api_admin_runtime_status(request: Request):
+    _require_admin(request)
+    info: dict[str, Any] = {
+        "pid": os.getpid(),
+        "warmup_ready": _WARMUP_STATUS.get("ready", False),
+        "warmup_error": _WARMUP_STATUS.get("error", ""),
+        "shared_ready": bool(_SHARED_MODELS.get("ready")),
+    }
+    for key, p in (
+        ("vm_status", Path("/proc/self/status")),
+        ("cg_cur", Path("/sys/fs/cgroup/memory.current")),
+        ("cg_max", Path("/sys/fs/cgroup/memory.max")),
+    ):
+        try:
+            txt = p.read_text(encoding="utf-8", errors="ignore")
+            if key == "vm_status":
+                lines = [ln for ln in txt.splitlines() if ln.startswith(("VmRSS:", "VmSize:", "VmHWM:"))]
+                info[key] = "; ".join(lines)
+            else:
+                info[key] = txt.strip()
+        except Exception:
+            pass
+    return info
 
 
 @app.delete("/api/admin/users/{user_id}")
@@ -648,7 +695,9 @@ async def ws_analyze_video(
         return
 
     await websocket.send_json({"type": "status", "message": "Initializing AI detection pipeline..."})
-    engine = await asyncio.to_thread(_create_session_engine, confidence, cooldown)
+    engine = await _init_ws_engine(websocket, confidence, cooldown)
+    if engine is None:
+        return
     source = VideoFileSource(video_path)
     evidence_saver = EvidenceSaver(config.evidence_dir, cooldown_sec=0.0)
     session = MonitoringSession(
@@ -738,7 +787,9 @@ async def ws_live_webcam(websocket: WebSocket, token: str = ""):
         await websocket.close()
         return
 
-    engine = await asyncio.to_thread(_create_session_engine)
+    engine = await _init_ws_engine(websocket)
+    if engine is None:
+        return
     evidence_saver = EvidenceSaver(config.evidence_dir, cooldown_sec=0.0)
     session_id = db.create_session(
         mode="live",
@@ -771,9 +822,6 @@ async def ws_live_webcam(websocket: WebSocket, token: str = ""):
 
             elapsed = time.monotonic() - start_t
             result = await asyncio.to_thread(engine.process_frame, frame, elapsed)
-            if not snapshot_saved:
-                evidence_saver.save_session_snapshot(session_id, result.annotated_frame)
-                snapshot_saved = True
             if not snapshot_saved:
                 evidence_saver.save_session_snapshot(session_id, result.annotated_frame)
                 snapshot_saved = True
@@ -863,7 +911,9 @@ async def ws_ip_camera(
         await websocket.close()
         return
 
-    engine = await asyncio.to_thread(_create_session_engine)
+    engine = await _init_ws_engine(websocket)
+    if engine is None:
+        return
     evidence_saver = EvidenceSaver(config.evidence_dir, cooldown_sec=0.0)
     session_id = db.create_session(
         mode="live",
