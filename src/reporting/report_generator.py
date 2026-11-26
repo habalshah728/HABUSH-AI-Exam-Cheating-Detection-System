@@ -1,6 +1,7 @@
 """Professional PDF report generation using ReportLab."""
 
 from collections import Counter
+import io
 from pathlib import Path
 from typing import Any
 from xml.sax.saxutils import escape
@@ -77,6 +78,23 @@ class ReportGenerator:
         except Exception:
             pass
         return max_w, max_h * 0.85
+
+    @classmethod
+    def _build_pdf_image(
+        cls, image_path: Path, max_w: float, max_h: float
+    ) -> Image:
+        """Compress evidence screenshots to crisp in-memory JPEG so PDFs stay lightweight."""
+        w, h = cls._fit_image_size(image_path, max_w=max_w, max_h=max_h)
+        try:
+            with PILImage.open(image_path) as im:
+                rgb = im.convert("RGB")
+                rgb.thumbnail((560, 560), PILImage.Resampling.LANCZOS)
+                buf = io.BytesIO()
+                rgb.save(buf, format="JPEG", quality=82, optimize=True)
+                buf.seek(0)
+                return Image(buf, width=w, height=h)
+        except Exception:
+            return Image(str(image_path), width=w, height=h)
 
     def generate(self, session_id: int) -> Path:
         """Generate a PDF report for ``session_id`` and record it in SQLite."""
@@ -304,8 +322,7 @@ class ReportGenerator:
             img_cells = []
             row: list[Any] = []
             for img_path, caption_text in resolved_shots:
-                w, h = self._fit_image_size(img_path, max_w=2.3 * inch, max_h=1.65 * inch)
-                img = Image(str(img_path), width=w, height=h)
+                img = self._build_pdf_image(img_path, max_w=2.3 * inch, max_h=1.65 * inch)
                 caption = Paragraph(escape(caption_text), cap_style)
                 row.append([img, Spacer(1, 3), caption])
                 if len(row) == 2:

@@ -182,7 +182,7 @@ async def _lifespan(_app: FastAPI):
 
 app = FastAPI(
     title="HABUSH CMS — AI Exam Integrity Platform",
-    version="1.1.2",
+    version="1.1.3",
     lifespan=_lifespan,
 )
 
