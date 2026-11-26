@@ -41,6 +41,7 @@ class PersonTracker:
         """
         active_persons: list[TrackedPerson] = []
         phones: list[Detection] = []
+        used_ids: set[int] = set()
 
         for det in detections:
             if det.label == "cell phone":
@@ -52,7 +53,8 @@ class PersonTracker:
 
             track_id = det.track_id
             if track_id is None:
-                track_id = self._match_or_assign_id(det.bbox, timestamp_sec)
+                track_id = self._match_or_assign_id(det.bbox, timestamp_sec, used_ids)
+            used_ids.add(track_id)
 
             if track_id in self._persons:
                 person = self._persons[track_id]
@@ -74,12 +76,17 @@ class PersonTracker:
         return active_persons, phones
 
     def _match_or_assign_id(
-        self, bbox: tuple[int, int, int, int], timestamp_sec: float
+        self,
+        bbox: tuple[int, int, int, int],
+        timestamp_sec: float,
+        excluded_ids: Optional[set[int]] = None,
     ) -> int:
         """Fallback IoU matcher if the detector did not supply a track ID."""
         best_id: Optional[int] = None
-        best_iou = 0.30
+        best_iou = 0.25
         for tid, person in self._persons.items():
+            if excluded_ids and tid in excluded_ids:
+                continue
             if timestamp_sec - person.last_seen > 5.0:
                 continue
             iou = self._compute_iou(bbox, person.bbox)
@@ -89,7 +96,9 @@ class PersonTracker:
         if best_id is not None:
             return best_id
 
-        while self._next_fallback_id in self._persons:
+        while self._next_fallback_id in self._persons or (
+            excluded_ids and self._next_fallback_id in excluded_ids
+        ):
             self._next_fallback_id += 1
         assigned = self._next_fallback_id
         self._next_fallback_id += 1

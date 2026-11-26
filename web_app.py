@@ -16,7 +16,6 @@ from typing import Any
 import uuid
 
 import cv2
-import torch
 from fastapi import (
     FastAPI,
     File,
@@ -90,18 +89,24 @@ def _get_or_init_shared_models() -> dict[str, Any]:
     with _MODEL_INIT_LOCK:
         if _SHARED_MODELS.get("ready"):
             return _SHARED_MODELS
-        torch.set_num_threads(2)
         cv2.setNumThreads(2)
 
-        from ultralytics import YOLO
         from src.analysis.mediapipe_models import (
             create_face_landmarker,
             create_hand_landmarker,
         )
 
         model_path = config.models_dir / config.yolo_model_name
-        yolo_ref = str(model_path) if model_path.exists() else config.yolo_model_name
-        yolo_model = YOLO(yolo_ref)
+        onnx_path = model_path.with_suffix(".onnx")
+        if onnx_path.exists() and onnx_path.stat().st_size > 0:
+            yolo_model = cv2.dnn.readNetFromONNX(str(onnx_path))
+        else:
+            import torch
+            from ultralytics import YOLO
+
+            torch.set_num_threads(2)
+            yolo_ref = str(model_path) if model_path.exists() else config.yolo_model_name
+            yolo_model = YOLO(yolo_ref)
         face_mesh = create_face_landmarker(config.models_dir)
         hands = create_hand_landmarker(config.models_dir)
 
@@ -156,7 +161,7 @@ async def _lifespan(_app: FastAPI):
 
 app = FastAPI(
     title="HABUSH CMS — AI Exam Integrity Platform",
-    version="1.0.0",
+    version="1.1.0",
     lifespan=_lifespan,
 )
 
