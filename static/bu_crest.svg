@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 140" width="120" height="140">
+  <!-- Shield background -->
+  <defs>
+    <linearGradient id="shieldGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#0a2240"/>
+      <stop offset="100%" style="stop-color:#1b365d"/>
+    </linearGradient>
+  </defs>
+  <path d="M60 4 L110 24 L110 70 Q110 110 60 136 Q10 110 10 70 L10 24 Z" fill="url(#shieldGrad)" stroke="#c59b27" stroke-width="2.5"/>
+  <!-- Inner shield border -->
+  <path d="M60 12 L102 29 L102 70 Q102 106 60 128 Q18 106 18 70 L18 29 Z" fill="none" stroke="#c59b27" stroke-width="1.2" opacity="0.6"/>
+  <!-- Anchor symbol (Navy) -->
+  <g transform="translate(60,52)" fill="#c59b27">
+    <!-- Anchor ring -->
+    <circle cx="0" cy="-14" r="5" fill="none" stroke="#c59b27" stroke-width="2"/>
+    <!-- Anchor stock (horizontal bar) -->
+    <rect x="-12" y="-8" width="24" height="2.5" rx="1.2" fill="#c59b27"/>
+    <!-- Anchor shank (vertical) -->
+    <rect x="-1.2" y="-8" width="2.4" height="30" rx="1" fill="#c59b27"/>
+    <!-- Anchor ring bottom -->
+    <ellipse cx="0" cy="22" rx="10" ry="4" fill="none" stroke="#c59b27" stroke-width="2"/>
+    <!-- Left fluke -->
+    <path d="M-1.2 22 Q-14 16 -16 10 Q-10 8 -6 14 L-1.2 18 Z" fill="#c59b27"/>
+    <!-- Right fluke -->
+    <path d="M1.2 22 Q14 16 16 10 Q10 8 6 14 L1.2 18 Z" fill="#c59b27"/>
+    <!-- Rope around shank -->
+    <path d="M-1.2 0 Q5 2 4 8 Q5 15 -1.2 16" fill="none" stroke="#c59b27" stroke-width="1.5" opacity="0.8"/>
+  </g>
+  <!-- Stars -->
+  <g fill="#c59b27" opacity="0.9">
+    <polygon points="30,52 32,58 38,58 33,62 35,68 30,64 25,68 27,62 22,58 28,58" transform="scale(0.5) translate(28,70)"/>
+    <polygon points="90,52 92,58 98,58 93,62 95,68 90,64 85,68 87,62 82,58 88,58" transform="scale(0.5) translate(-18,70)"/>
+  </g>
+  <!-- Monogram -->
+  <text x="60" y="107" text-anchor="middle" font-family="Georgia, serif" font-size="10.5" font-weight="bold" fill="#c59b27" letter-spacing="1.6">HABUSH</text>
+</svg>
