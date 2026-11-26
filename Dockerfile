@@ -13,6 +13,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 ENV OMP_NUM_THREADS=2 \
     MKL_NUM_THREADS=2 \
+    OPENBLAS_NUM_THREADS=2 \
+    NUMEXPR_NUM_THREADS=2 \
     MALLOC_ARENA_MAX=2 \
     YOLO_VERBOSE=False \
     YOLO_CONFIG_DIR=/tmp/ultralytics \

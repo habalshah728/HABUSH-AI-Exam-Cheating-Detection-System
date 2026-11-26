@@ -51,7 +51,7 @@ class AppConfig:
     models_dir: Path = field(default_factory=lambda: BASE_DIR / "models")
     yolo_model_name: str = "yolov8n.pt"
     resize_width: int = 640
-    frame_skip: int = 3
+    frame_skip: int = 4
     detection_confidence: float = 0.40
     supported_video_extensions: tuple[str, ...] = (".mp4", ".avi")
     weights: RiskWeights = field(default_factory=RiskWeights)

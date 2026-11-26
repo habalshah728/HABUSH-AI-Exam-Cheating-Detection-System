@@ -51,7 +51,7 @@ def render_auth_page(auth_manager: AuthManager) -> None:
 
         with tab_register:
             with st.form("register_form"):
-                full_name = st.text_input("Full Name", placeholder="Syed Hablillah Shah")
+                full_name = st.text_input("Full Name", placeholder="Enter your full name")
                 reg_email = st.text_input("Email Address", placeholder="controller@example.com")
                 reg_password = st.text_input("Password (min 6 chars)", type="password")
                 reg_confirm = st.text_input("Confirm Password", type="password")

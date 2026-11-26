@@ -107,6 +107,10 @@ class MonitoringSession:
 
         result = self._engine.process_frame(frame, timestamp_sec)
         self._stats.frames_processed += 1
+        if self._stats.frames_processed == 1:
+            self._evidence_saver.save_session_snapshot(
+                self._session_id, result.annotated_frame
+            )
         self._stats.total_people = result.total_unique_people
         self._stats.phones_found = max(self._stats.phones_found, len(result.phones))
 
@@ -142,6 +146,15 @@ class MonitoringSession:
         result.new_events = persisted_events
         self._stats.total_events = len(self._events)
         return True, result
+
+    def next_analyzed_step(self) -> tuple[bool, Optional[FrameResult]]:
+        """Advance through skipped frames and return the next analyzed FrameResult."""
+        while True:
+            has_more, result = self.step()
+            if not has_more:
+                return False, None
+            if result is not None:
+                return True, result
 
     def run_all(
         self,

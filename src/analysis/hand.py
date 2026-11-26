@@ -20,13 +20,18 @@ class HandAnalyzer(Analyzer):
         sustained_frames: int = 3,
         window_sec: float = 10.0,
         create_hands: bool = True,
+        hands: Any = None,
     ) -> None:
         self._speed_threshold = speed_threshold
         self._sustained_frames = sustained_frames
         self._window_sec = window_sec
         self._prev_wrist: dict[int, tuple[float, float]] = {}
         self._fast_events: dict[int, deque[float]] = defaultdict(deque)
-        self._hands = self._init_hands() if create_hands else None
+        self._owns_hands = hands is None
+        if hands is not None:
+            self._hands = hands
+        else:
+            self._hands = self._init_hands() if create_hands else None
 
     @staticmethod
     def _init_hands():
@@ -55,6 +60,14 @@ class HandAnalyzer(Analyzer):
 
         import mediapipe as mp
 
+        ch, cw = crop.shape[:2]
+        if max(ch, cw) > 320:
+            scale = 320.0 / float(max(ch, cw))
+            crop = cv2.resize(
+                crop,
+                (max(1, int(cw * scale)), max(1, int(ch * scale))),
+                interpolation=cv2.INTER_AREA,
+            )
         rgb_crop = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
         mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_crop)
         res = self._hands.detect(mp_image)
@@ -87,6 +100,6 @@ class HandAnalyzer(Analyzer):
         )
 
     def close(self) -> None:
-        if self._hands is not None:
+        if self._hands is not None and self._owns_hands:
             self._hands.close()
-            self._hands = None
+        self._hands = None

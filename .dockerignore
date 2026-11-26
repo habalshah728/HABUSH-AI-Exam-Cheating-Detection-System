@@ -6,5 +6,6 @@ __pycache__/
 data/
 evidence/
 reports/
+sample_videos/
 .env
 .streamlit/secrets.toml

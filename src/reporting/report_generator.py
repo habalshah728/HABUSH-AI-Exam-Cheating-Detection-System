@@ -56,7 +56,10 @@ class ReportGenerator:
         candidate = Path(raw_path)
         if candidate.exists():
             return candidate
-        fallback = self._evidence_dir / f"session_{session_id}" / candidate.name
+        filename = raw_path.replace("\\", "/").rsplit("/", 1)[-1]
+        if not filename:
+            return None
+        fallback = self._evidence_dir / f"session_{session_id}" / filename
         if fallback.exists():
             return fallback
         return None
@@ -272,14 +275,21 @@ class ReportGenerator:
                 Paragraph("No suspicious events were recorded in this session.", styles["Normal"])
             )
 
-        # Fallback: include session snapshot or any session screenshots on disk if none linked
-        if not resolved_shots:
-            session_dir = self._evidence_dir / f"session_{session_id}"
-            if session_dir.exists():
-                for img_file in sorted(session_dir.glob("*.png")):
-                    resolved_shots.append(
-                        (img_file, f"Session Snapshot — {session.get('source_name', '')}")
-                    )
+        # Include any additional saved screenshots on disk (and session snapshot fallback)
+        session_dir = self._evidence_dir / f"session_{session_id}"
+        if session_dir.exists():
+            seen_resolved = {p.resolve() for p, _ in resolved_shots}
+            for img_file in sorted(session_dir.glob("*.png")):
+                if img_file.resolve() in seen_resolved:
+                    continue
+                if img_file.name == "session_snapshot.png" and resolved_shots:
+                    continue
+                cap_label = (
+                    f"Session Snapshot — {session.get('source_name', '')}"
+                    if img_file.name == "session_snapshot.png"
+                    else f"Captured Evidence — {img_file.stem}"
+                )
+                resolved_shots.append((img_file, cap_label))
 
         # Evidence screenshots (all available screenshots for this record)
         if resolved_shots:

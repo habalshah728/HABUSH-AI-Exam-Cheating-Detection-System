@@ -1,7 +1,9 @@
 """Central shared AI detection, analysis, and risk-scoring engine."""
 
+from contextlib import nullcontext
 from datetime import datetime
-from typing import Optional
+import threading
+from typing import Any, Optional
 
 import cv2
 import numpy as np
@@ -35,21 +37,33 @@ class DetectionEngine:
         self,
         config: AppConfig | None = None,
         detector: Detector | None = None,
+        shared_yolo_model: Any = None,
+        shared_face_mesh: Any = None,
+        shared_hands: Any = None,
+        infer_lock: Optional[threading.Lock] = None,
     ) -> None:
         self._config = config or AppConfig()
+        self._infer_lock = infer_lock
         self._detector = detector or PersonPhoneDetector(
             model_path=self._config.models_dir / self._config.yolo_model_name,
             confidence=self._config.detection_confidence,
             imgsz=self._config.resize_width,
+            yolo_model=shared_yolo_model,
         )
         self._tracker = PersonTracker()
         self._scorer = RiskScorer(
             weights=self._config.weights,
             window_sec=self._config.thresholds.sliding_window_sec,
         )
+        self._processed_count: int = 0
 
         # Shared FaceMesh for CPU efficiency; HeadPose & Talking reuse its landmarks.
-        self._shared_face_mesh = self._init_shared_face_mesh()
+        self._owns_face_mesh = shared_face_mesh is None
+        self._shared_face_mesh = (
+            shared_face_mesh
+            if shared_face_mesh is not None
+            else self._init_shared_face_mesh()
+        )
         self._head_pose = HeadPoseAnalyzer(
             yaw_threshold_deg=self._config.thresholds.side_look_yaw_deg,
             min_side_looks=self._config.thresholds.side_look_min_count,
@@ -66,7 +80,8 @@ class DetectionEngine:
         self._hand = HandAnalyzer(
             speed_threshold=self._config.thresholds.hand_speed_threshold,
             sustained_frames=self._config.thresholds.hand_sustained_frames,
-            create_hands=True,
+            create_hands=shared_hands is None,
+            hands=shared_hands,
         )
         self._interaction = InteractionAnalyzer(
             distance_ratio=self._config.thresholds.interaction_distance_ratio,
@@ -101,7 +116,10 @@ class DetectionEngine:
     def process_frame(self, frame: np.ndarray, timestamp_sec: float) -> FrameResult:
         """Run the 5-step AI pipeline on a single BGR frame."""
         resized = self._resize_for_cpu(frame)
-        detections = self._detector.detect(resized)
+        self._processed_count += 1
+        lock_ctx = self._infer_lock if self._infer_lock is not None else nullcontext()
+        with lock_ctx:
+            detections = self._detector.detect(resized)
         persons, phones = self._tracker.update(detections, timestamp_sec)
 
         phone_duration = self._tracker.get_phone_visible_duration(timestamp_sec)
@@ -129,10 +147,15 @@ class DetectionEngine:
             if talk_ind.detected:
                 person_triggers[person.track_id].append((talk_ind.name, talk_ind.detail))
 
-            # CPU optimization: run hand analysis when a person is near a phone or
-            # already has a posture/talking cue, or when <= 3 people are in frame.
-            if len(persons) <= 3 or person_triggers[person.track_id] or len(phones) > 0:
-                hand_ind = self._hand.analyse(person, resized, timestamp_sec)
+            # CPU optimization: run hand analysis every 2nd processed frame or when phones/cues appear.
+            run_hand = (
+                (self._processed_count % 2 == 1 and len(persons) <= 3)
+                or len(phones) > 0
+                or bool(person_triggers[person.track_id])
+            )
+            if run_hand:
+                with lock_ctx:
+                    hand_ind = self._hand.analyse(person, resized, timestamp_sec)
                 if hand_ind.detected:
                     person_triggers[person.track_id].append((hand_ind.name, hand_ind.detail))
 
@@ -215,11 +238,23 @@ class DetectionEngine:
         crop = frame[y1:y2, x1:x2]
         if crop.size == 0:
             return None
+        ch, cw = crop.shape[:2]
+        if ch < 36 or cw < 36:
+            return None
+        if max(ch, cw) > 320:
+            scale = 320.0 / float(max(ch, cw))
+            crop = cv2.resize(
+                crop,
+                (max(1, int(cw * scale)), max(1, int(ch * scale))),
+                interpolation=cv2.INTER_AREA,
+            )
         import mediapipe as mp
 
         rgb = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
         mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
-        res = self._shared_face_mesh.detect(mp_image)
+        lock_ctx = self._infer_lock if self._infer_lock is not None else nullcontext()
+        with lock_ctx:
+            res = self._shared_face_mesh.detect(mp_image)
         if res.face_landmarks:
             return res.face_landmarks[0]
         return None
@@ -310,9 +345,10 @@ class DetectionEngine:
         return self._tracker.get_all_persons()
 
     def close(self) -> None:
-        """Release MediaPipe resources."""
-        if self._shared_face_mesh is not None:
+        """Release owned MediaPipe resources and reset stateful tracker."""
+        self._detector.reset_tracker()
+        if self._shared_face_mesh is not None and self._owns_face_mesh:
             self._shared_face_mesh.close()
-            self._shared_face_mesh = None
+        self._shared_face_mesh = None
         for analyzer in self._analyzers:
             analyzer.close()

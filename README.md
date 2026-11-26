@@ -18,24 +18,6 @@
 
 ---
 
-## Project Structure
-
-```text
-├── web_app.py                      # FastAPI + WebSocket production web portal
-├── app.py                          # Streamlit dashboard entry point
-├── Dockerfile                      # Production CPU Docker container (Railway/Render)
-├── render.yaml                     # Cloud deployment blueprint
-├── PROJECT_DETAILS.md              # Detailed technical documentation
-├── .env.example                    # Non-secret environment template
-├── .streamlit/secrets.toml.example # Streamlit SMTP secrets template
-├── models/                         # yolov8n.pt, face_landmarker.task, hand_landmarker.task
-├── static/                         # HABUSH CMS frontend (index.html, styles.css, app.js)
-├── tests/                          # Pytest test suite (9 tests)
-└── src/                            # Modular OOP Python backend packages
-```
-
----
-
 ## Quick Start (Local)
 
 ```powershell

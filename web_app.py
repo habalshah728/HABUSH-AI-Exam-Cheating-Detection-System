@@ -3,17 +3,20 @@
 import asyncio
 import base64
 from contextlib import asynccontextmanager
+import ctypes
 import gc
 import hashlib
 import os
 from pathlib import Path
 import secrets
 import shutil
+import threading
 import time
 from typing import Any
 import uuid
 
 import cv2
+import torch
 from fastapi import (
     FastAPI,
     File,
@@ -65,14 +68,82 @@ if _admin_email and _admin_password:
     )
 report_gen = ReportGenerator(db, config.reports_dir, evidence_dir=config.evidence_dir)
 
+_MODEL_INIT_LOCK = threading.Lock()
+_INFER_LOCK = threading.Lock()
+_SHARED_MODELS: dict[str, Any] = {}
+
+
+def _trim_process_memory() -> None:
+    """Release unused Python/libc heap pages back to the OS on Linux hosts."""
+    gc.collect()
+    try:
+        if os.name == "posix":
+            ctypes.CDLL("libc.so.6").malloc_trim(0)
+    except Exception:
+        pass
+
+
+def _get_or_init_shared_models() -> dict[str, Any]:
+    """Load and warm the single process-wide YOLO + MediaPipe runtime once."""
+    if _SHARED_MODELS.get("ready"):
+        return _SHARED_MODELS
+    with _MODEL_INIT_LOCK:
+        if _SHARED_MODELS.get("ready"):
+            return _SHARED_MODELS
+        torch.set_num_threads(2)
+        cv2.setNumThreads(2)
+
+        from ultralytics import YOLO
+        from src.analysis.mediapipe_models import (
+            create_face_landmarker,
+            create_hand_landmarker,
+        )
+
+        model_path = config.models_dir / config.yolo_model_name
+        yolo_ref = str(model_path) if model_path.exists() else config.yolo_model_name
+        yolo_model = YOLO(yolo_ref)
+        face_mesh = create_face_landmarker(config.models_dir)
+        hands = create_hand_landmarker(config.models_dir)
+
+        # Run one tiny dummy warmup frame so first user request avoids JIT/fusion stall.
+        warm_engine = DetectionEngine(
+            config=config,
+            shared_yolo_model=yolo_model,
+            shared_face_mesh=face_mesh,
+            shared_hands=hands,
+            infer_lock=_INFER_LOCK,
+        )
+        dummy = np.zeros((240, 320, 3), dtype=np.uint8)
+        warm_engine.process_frame(dummy, 0.0)
+        warm_engine.close()
+
+        _SHARED_MODELS["yolo_model"] = yolo_model
+        _SHARED_MODELS["face_mesh"] = face_mesh
+        _SHARED_MODELS["hands"] = hands
+        _SHARED_MODELS["ready"] = True
+        _trim_process_memory()
+    return _SHARED_MODELS
+
+
+def _create_session_engine(confidence: float = 0.40, cooldown: float = 5.0) -> DetectionEngine:
+    """Create a lightweight per-session DetectionEngine backed by cached models."""
+    shared = _get_or_init_shared_models()
+    engine = DetectionEngine(
+        config=config,
+        shared_yolo_model=shared["yolo_model"],
+        shared_face_mesh=shared["face_mesh"],
+        shared_hands=shared["hands"],
+        infer_lock=_INFER_LOCK,
+    )
+    engine.set_confidence(confidence)
+    engine.set_alert_cooldown(cooldown)
+    return engine
+
+
 def _warmup_models() -> None:
     """Pre-warm YOLO + MediaPipe runtimes in a worker thread after server startup."""
     try:
-        eng = DetectionEngine(config=config)
-        dummy = np.zeros((240, 320, 3), dtype=np.uint8)
-        eng.process_frame(dummy, 0.0)
-        eng.close()
-        gc.collect()
+        _get_or_init_shared_models()
     except Exception:
         pass
 
@@ -518,10 +589,21 @@ async def api_upload_video(request: Request, file: UploadFile = File(...)):
     content = await file.read()
     dest.write_bytes(content)
 
+    preview_b64 = ""
     try:
         probe = VideoFileSource(dest)
         probe.open()
         meta = probe.get_metadata()
+        ok_prev, prev_frame, _ = probe.read()
+        if ok_prev and prev_frame is not None:
+            ph, pw = prev_frame.shape[:2]
+            if pw > 640:
+                prev_frame = cv2.resize(
+                    prev_frame,
+                    (640, max(1, int(ph * 640 / float(pw)))),
+                    interpolation=cv2.INTER_AREA,
+                )
+            preview_b64 = _encode_jpeg_b64(prev_frame, quality=72)
         probe.release()
     except ExamMonitorError as exc:
         dest.unlink(missing_ok=True)
@@ -537,6 +619,7 @@ async def api_upload_video(request: Request, file: UploadFile = File(...)):
         "fps": meta.fps,
         "total_frames": meta.total_frames,
         "size_mb": round(len(content) / (1024 * 1024), 2),
+        "preview_image": preview_b64,
     }
 
 
@@ -545,7 +628,7 @@ async def ws_analyze_video(
     websocket: WebSocket,
     upload_id: str,
     token: str = "",
-    frame_skip: int = 3,
+    frame_skip: int = 4,
     confidence: float = 0.40,
     cooldown: float = 5.0,
 ):
@@ -559,13 +642,10 @@ async def ws_analyze_video(
         await websocket.close()
         return
 
-    engine = await asyncio.to_thread(DetectionEngine, config)
-    engine.set_confidence(confidence)
-    engine.set_alert_cooldown(cooldown)
+    await websocket.send_json({"type": "status", "message": "Initializing AI detection pipeline..."})
+    engine = await asyncio.to_thread(_create_session_engine, confidence, cooldown)
     source = VideoFileSource(video_path)
-    evidence_saver = EvidenceSaver(
-        config.evidence_dir, cooldown_sec=max(0.0, cooldown - 0.5)
-    )
+    evidence_saver = EvidenceSaver(config.evidence_dir, cooldown_sec=0.0)
     session = MonitoringSession(
         mode="video",
         source=source,
@@ -582,7 +662,7 @@ async def ws_analyze_video(
         await websocket.send_json({"type": "started", "session_id": session_id})
 
         while True:
-            has_more, result = await asyncio.to_thread(session.step)
+            has_more, result = await asyncio.to_thread(session.next_analyzed_step)
             if not has_more:
                 break
             if result is None:
@@ -630,10 +710,13 @@ async def ws_analyze_video(
         session.stop()
     except Exception as exc:
         session.stop()
-        await websocket.send_json({"type": "error", "message": str(exc)})
+        try:
+            await websocket.send_json({"type": "error", "message": str(exc)})
+        except Exception:
+            pass
     finally:
         engine.close()
-        gc.collect()
+        _trim_process_memory()
 
 
 # ----------------------------------------------------------------------
@@ -650,11 +733,8 @@ async def ws_live_webcam(websocket: WebSocket, token: str = ""):
         await websocket.close()
         return
 
-    engine = await asyncio.to_thread(DetectionEngine, config)
-    evidence_saver = EvidenceSaver(
-        config.evidence_dir,
-        cooldown_sec=max(0.0, config.thresholds.alert_cooldown_sec - 0.5),
-    )
+    engine = await asyncio.to_thread(_create_session_engine)
+    evidence_saver = EvidenceSaver(config.evidence_dir, cooldown_sec=0.0)
     session_id = db.create_session(
         mode="live",
         source_name="Browser Live Webcam",
@@ -665,6 +745,7 @@ async def ws_live_webcam(websocket: WebSocket, token: str = ""):
     start_t = time.monotonic()
     total_events = 0
     evidence_saved = 0
+    snapshot_saved = False
     max_risk = "Low"
     risk_order = {"Low": 0, "Medium": 1, "High": 2}
 
@@ -685,6 +766,12 @@ async def ws_live_webcam(websocket: WebSocket, token: str = ""):
 
             elapsed = time.monotonic() - start_t
             result = await asyncio.to_thread(engine.process_frame, frame, elapsed)
+            if not snapshot_saved:
+                evidence_saver.save_session_snapshot(session_id, result.annotated_frame)
+                snapshot_saved = True
+            if not snapshot_saved:
+                evidence_saver.save_session_snapshot(session_id, result.annotated_frame)
+                snapshot_saved = True
 
             new_events_payload, added_ev, added_shots, max_risk = _record_live_events(
                 session_id, result, evidence_saver, max_risk, risk_order
@@ -771,11 +858,8 @@ async def ws_ip_camera(
         await websocket.close()
         return
 
-    engine = await asyncio.to_thread(DetectionEngine, config)
-    evidence_saver = EvidenceSaver(
-        config.evidence_dir,
-        cooldown_sec=max(0.0, config.thresholds.alert_cooldown_sec - 0.5),
-    )
+    engine = await asyncio.to_thread(_create_session_engine)
+    evidence_saver = EvidenceSaver(config.evidence_dir, cooldown_sec=0.0)
     session_id = db.create_session(
         mode="live",
         source_name=f"IP Camera: {cam_url[:60]}",
@@ -786,6 +870,7 @@ async def ws_ip_camera(
     start_t = time.monotonic()
     total_events = 0
     evidence_saved = 0
+    snapshot_saved = False
     max_risk = "Low"
     risk_order = {"Low": 0, "Medium": 1, "High": 2}
 
@@ -831,6 +916,9 @@ async def ws_ip_camera(
 
             elapsed = time.monotonic() - start_t
             result = await asyncio.to_thread(engine.process_frame, frame, elapsed)
+            if not snapshot_saved:
+                evidence_saver.save_session_snapshot(session_id, result.annotated_frame)
+                snapshot_saved = True
 
             new_events_payload, added_ev, added_shots, max_risk = _record_live_events(
                 session_id, result, evidence_saver, max_risk, risk_order

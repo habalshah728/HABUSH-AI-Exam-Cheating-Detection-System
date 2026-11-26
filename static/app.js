@@ -8,6 +8,7 @@ const state = {
   campus: localStorage.getItem("bu_em_campus") || "",
   pendingEmail: "",
   uploadId: null,
+  uploadPreview: "",
   lastVideoSessionId: null,
   liveWs: null,
   liveStream: null,
@@ -377,27 +378,67 @@ $("videoFileInput").addEventListener("change", async (e) => {
   const form = new FormData(); form.append("file", file);
   $("videoMetaBar").textContent = `Uploading ${file.name}...`;
   $("videoMetaBar").className = "banner banner-info"; $("videoMetaBar").classList.remove("hidden");
-  const res = await apiFetch("/api/videos/upload", { method: "POST", body: form });
-  const data = await res.json();
-  if (!res.ok) {
-    $("videoMetaBar").textContent = data.detail || "Upload failed.";
-    $("videoMetaBar").className = "banner banner-error"; return;
+  $("btnStartVideo").disabled = true;
+  try {
+    const res = await apiFetch("/api/videos/upload", { method: "POST", body: form });
+    const data = await res.json();
+    if (!res.ok) {
+      $("videoMetaBar").textContent = data.detail || "Upload failed.";
+      $("videoMetaBar").className = "banner banner-error"; return;
+    }
+    state.uploadId = data.upload_id;
+    state.uploadPreview = data.preview_image || "";
+    $("videoMetaBar").innerHTML = `✅ <strong>${data.filename}</strong> &nbsp;|&nbsp; Duration: <strong>${fmtDuration(data.duration_sec)}</strong> &nbsp;|&nbsp; <strong>${data.width}×${data.height}</strong> @${Math.round(data.fps)}fps &nbsp;|&nbsp; <strong>${data.size_mb} MB</strong>`;
+    $("btnStartVideo").disabled = false; $("btnVideoPdf").classList.add("hidden");
+    $("videoStatus").textContent = "File Ready"; $("videoStatus").className = "badge badge-low";
+
+    $("videoAnalysisPanel").classList.remove("hidden");
+    $("videoEventList").innerHTML = "";
+    $("videoTimelineTrack").innerHTML = `<div class="timeline-line"></div>`;
+    $("videoProgressFill").style.width = "0%";
+    $("vidPeople").textContent = "0"; $("vidEvents").textContent = "0";
+    $("vidPhones").textContent = "0"; $("vidMaxRisk").textContent = "Low";
+    $("vidMaxRisk").className = "kpi-value";
+    if (state.uploadPreview) {
+      $("videoStreamImg").src = `data:image/jpeg;base64,${state.uploadPreview}`;
+      $("videoStreamImg").classList.remove("hidden");
+      $("videoStagePlaceholder").classList.add("hidden");
+      $("videoProgressText").textContent = "Preview loaded — click ▶ Start Analysis to run AI detection.";
+    } else {
+      $("videoStreamImg").classList.add("hidden");
+      $("videoStagePlaceholder").textContent = "Video uploaded — click ▶ Start Analysis";
+      $("videoStagePlaceholder").classList.remove("hidden");
+      $("videoProgressText").textContent = "Ready to analyse.";
+    }
+  } catch (err) {
+    $("videoMetaBar").textContent = `Upload error: ${err.message || "Network error"}`;
+    $("videoMetaBar").className = "banner banner-error";
   }
-  state.uploadId = data.upload_id;
-  $("videoMetaBar").innerHTML = `✅ <strong>${data.filename}</strong> &nbsp;|&nbsp; Duration: <strong>${fmtDuration(data.duration_sec)}</strong> &nbsp;|&nbsp; <strong>${data.width}×${data.height}</strong> @${Math.round(data.fps)}fps &nbsp;|&nbsp; <strong>${data.size_mb} MB</strong>`;
-  $("btnStartVideo").disabled = false; $("btnVideoPdf").classList.add("hidden");
-  $("videoStatus").textContent = "File Ready"; $("videoStatus").className = "badge badge-low";
 });
 
 $("btnStartVideo").addEventListener("click", () => {
   if (!state.uploadId) return;
+  let analysisDone = false;
   $("videoAnalysisPanel").classList.remove("hidden");
   $("videoEventList").innerHTML = "";
   $("videoTimelineTrack").innerHTML = `<div class="timeline-line"></div>`;
+  $("videoProgressFill").style.width = "0%";
+  $("videoProgressText").textContent = "Connecting to AI engine...";
+  $("vidPeople").textContent = "0"; $("vidEvents").textContent = "0";
+  $("vidPhones").textContent = "0"; $("vidMaxRisk").textContent = "Low";
+  $("vidMaxRisk").className = "kpi-value";
   $("btnStartVideo").disabled = true;
+  $("btnVideoPdf").classList.add("hidden");
   $("videoStatus").textContent = "Analysing..."; $("videoStatus").className = "badge badge-medium";
-  $("videoStagePlaceholder").classList.add("hidden");
-  $("videoStreamImg").classList.remove("hidden");
+  if (state.uploadPreview) {
+    $("videoStreamImg").src = `data:image/jpeg;base64,${state.uploadPreview}`;
+    $("videoStreamImg").classList.remove("hidden");
+    $("videoStagePlaceholder").classList.add("hidden");
+  } else {
+    $("videoStreamImg").classList.add("hidden");
+    $("videoStagePlaceholder").textContent = "Loading AI models & starting video...";
+    $("videoStagePlaceholder").classList.remove("hidden");
+  }
 
   const proto = location.protocol === "https:" ? "wss" : "ws";
   const params = new URLSearchParams({
@@ -410,7 +451,14 @@ $("btnStartVideo").addEventListener("click", () => {
 
   ws.onmessage = (evt) => {
     const msg = JSON.parse(evt.data);
-    if (msg.type === "frame") {
+    if (msg.type === "status") {
+      $("videoProgressText").textContent = msg.message || "Preparing AI pipeline...";
+    } else if (msg.type === "started") {
+      state.lastVideoSessionId = msg.session_id;
+      $("videoProgressText").textContent = `Session #${msg.session_id} started — scanning frames...`;
+    } else if (msg.type === "frame") {
+      $("videoStagePlaceholder").classList.add("hidden");
+      $("videoStreamImg").classList.remove("hidden");
       $("videoStreamImg").src = `data:image/jpeg;base64,${msg.image}`;
       $("videoProgressFill").style.width = `${msg.progress}%`;
       $("videoProgressText").textContent = `${msg.progress}% — ${fmtDuration(msg.timestamp_sec)}`;
@@ -429,22 +477,38 @@ $("btnStartVideo").addEventListener("click", () => {
           `<div class="${cls}"><strong>${escapeHtml(ev.category)}</strong><div class="alert-meta">Person ${ev.track_id} · ${fmtDuration(ev.timestamp_sec)} · ${riskBadge(ev.risk_level)} (${ev.risk_score})</div></div>`);
       });
     } else if (msg.type === "completed") {
+      analysisDone = true;
       state.lastVideoSessionId = msg.session_id;
       $("videoProgressFill").style.width = "100%";
       $("videoProgressText").textContent = `✅ Completed — ${msg.events_count} event(s) flagged`;
+      $("vidPeople").textContent = msg.people;
+      $("vidEvents").textContent = msg.events_count;
+      $("vidMaxRisk").textContent = msg.max_risk;
+      $("vidMaxRisk").className = `kpi-value${msg.max_risk==="Low"?"":" alert"}`;
       $("btnStartVideo").disabled = false;
       $("btnVideoPdf").classList.remove("hidden");
       $("videoStatus").textContent = "Complete"; $("videoStatus").className = "badge badge-low";
+      loadDashboard();
     } else if (msg.type === "error") {
+      analysisDone = true;
       $("videoProgressText").textContent = `Error: ${msg.message}`;
       $("btnStartVideo").disabled = false;
       $("videoStatus").textContent = "Error"; $("videoStatus").className = "badge badge-high";
     }
   };
   ws.onerror = () => {
-    $("videoProgressText").textContent = "WebSocket error while running video analysis.";
-    $("btnStartVideo").disabled = false;
-    $("videoStatus").textContent = "Error"; $("videoStatus").className = "badge badge-high";
+    if (!analysisDone) {
+      $("videoProgressText").textContent = "WebSocket error while running video analysis.";
+      $("btnStartVideo").disabled = false;
+      $("videoStatus").textContent = "Error"; $("videoStatus").className = "badge badge-high";
+    }
+  };
+  ws.onclose = () => {
+    if (!analysisDone) {
+      $("videoProgressText").textContent = "Connection interrupted before analysis finished. Please retry (try increasing frame skip for faster scan).";
+      $("btnStartVideo").disabled = false;
+      $("videoStatus").textContent = "Disconnected"; $("videoStatus").className = "badge badge-high";
+    }
   };
 });
 

@@ -3,9 +3,10 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import numpy as np
+import torch
 
 from src.utils.exceptions import ModelLoadError
 from src.utils.logger import get_logger
@@ -37,6 +38,9 @@ class Detector(ABC):
     def set_confidence(self, confidence: float) -> None:
         """Update the minimum detection confidence threshold."""
 
+    def reset_tracker(self) -> None:
+        """Reset any stateful multi-frame tracker between independent sessions."""
+
 
 class PersonPhoneDetector(Detector):
     """YOLOv8-based detector for ``person`` and ``cell phone`` classes with ByteTrack."""
@@ -52,12 +56,24 @@ class PersonPhoneDetector(Detector):
         confidence: float = 0.40,
         imgsz: int = 640,
         use_tracking: bool = True,
+        yolo_model: Any = None,
     ) -> None:
         self._model_path = Path(model_path)
         self._confidence = float(confidence)
         self._imgsz = int(imgsz)
         self._use_tracking = use_tracking
-        self._model = self._load_model()
+        self._model = yolo_model if yolo_model is not None else self._load_model()
+
+    def reset_tracker(self) -> None:
+        """Reset Ultralytics ByteTrack state without reloading YOLO weights."""
+        predictor = getattr(self._model, "predictor", None)
+        if predictor is None:
+            return
+        trackers = getattr(predictor, "trackers", None)
+        if trackers:
+            for tracker in trackers:
+                if hasattr(tracker, "reset"):
+                    tracker.reset()
 
     def _load_model(self):
         """Load the Ultralytics YOLOv8 model, raising ModelLoadError on failure."""
@@ -92,24 +108,25 @@ class PersonPhoneDetector(Detector):
             return []
 
         classes = [PERSON_CLASS_ID, CELL_PHONE_CLASS_ID]
-        if self._use_tracking:
-            results = self._model.track(
-                frame,
-                persist=True,
-                tracker="bytetrack.yaml",
-                classes=classes,
-                conf=self._confidence,
-                imgsz=self._imgsz,
-                verbose=False,
-            )
-        else:
-            results = self._model.predict(
-                frame,
-                classes=classes,
-                conf=self._confidence,
-                imgsz=self._imgsz,
-                verbose=False,
-            )
+        with torch.inference_mode():
+            if self._use_tracking:
+                results = self._model.track(
+                    frame,
+                    persist=True,
+                    tracker="bytetrack.yaml",
+                    classes=classes,
+                    conf=self._confidence,
+                    imgsz=self._imgsz,
+                    verbose=False,
+                )
+            else:
+                results = self._model.predict(
+                    frame,
+                    classes=classes,
+                    conf=self._confidence,
+                    imgsz=self._imgsz,
+                    verbose=False,
+                )
 
         detections: list[Detection] = []
         if not results:
